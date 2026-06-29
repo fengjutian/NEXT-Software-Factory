@@ -299,7 +299,7 @@ def _build_step_list(status: str) -> list[dict]:
 
     if status == "failed":
         return [
-            {"name": s, "label": step_labels[s], "status": "failed" if s == "backend" else "skipped"}
+            {"name": s, "label": step_labels[s], "status": "skipped"}
             for s in step_order
         ]
     if status == "done":
