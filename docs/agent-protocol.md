@@ -64,6 +64,17 @@
                      │ (含 manifest)
                      ▼
 ┌─────────────────────────────────────────────────┐
+│ Review Agent (代码质检)                          │
+│                                                  │
+│ Input:  BackendResult.files                     │
+│         + FrontendResult.files                  │
+│ Output: ReviewReport                            │
+│         (含 review_manifest: 每个文件的质检结果) │
+│         CRITICAL 违规 → 驳回 Agent 重新生成      │
+└────────────────────┬────────────────────────────┘
+                     │ ✅ All passed / warnings only
+                     ▼
+┌─────────────────────────────────────────────────┐
 │ Test Agent                                       │
 │                                                  │
 │ Input:  RequirementSpec (全量功能 ID)            │
@@ -72,6 +83,18 @@
 │ Output: TestResult                               │
 │         (含 test_manifest: 声明每个功能覆盖了    │
 │          哪些测试、哪些未覆盖)                    │
+└────────────────────┬────────────────────────────┘
+                     │ TestResult
+                     ▼
+┌─────────────────────────────────────────────────┐
+│ Documentation Agent (文档生成)                   │
+│                                                  │
+│ Input:  All artifacts from all agents           │
+│         (OpenAPI Spec + DB Schema + Route Tree   │
+│          + DesignSpec + Test Report)             │
+│ Output: DocumentationResult                     │
+│         (README + API.md + DATABASE.md           │
+│          + ARCHITECTURE.md + DEPLOY.md)          │
 └─────────────────────────────────────────────────┘
 ```
 
