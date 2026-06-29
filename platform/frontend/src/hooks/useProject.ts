@@ -5,16 +5,19 @@ import {
   getFileTree,
   getFileContent,
   getSpec,
+  getAgentRuns,
   type Project,
   type FileTreeNode,
   type FileContent,
   type RequirementSpec,
+  type AgentRun,
 } from '@/api/client';
 
 interface ProjectState {
   project: Project | null;
   fileTree: FileTreeNode[] | null;
   spec: RequirementSpec | null;
+  agentRuns: AgentRun[] | null;
   loading: boolean;
   error: string | null;
 }
@@ -28,6 +31,7 @@ export function useProject(id: string | undefined): ProjectState & ProjectAction
   const [project, setProject] = useState<Project | null>(null);
   const [fileTree, setFileTree] = useState<FileTreeNode[] | null>(null);
   const [spec, setSpec] = useState<RequirementSpec | null>(null);
+  const [agentRuns, setAgentRuns] = useState<AgentRun[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,10 +43,11 @@ export function useProject(id: string | undefined): ProjectState & ProjectAction
       setProject(data);
       setError(null);
 
-      // If done or failed, also fetch files and spec
+      // If done or failed, also fetch files, spec, and agent runs
       if (data.status === 'done' || data.status === 'failed') {
         loadFiles();
         loadSpec();
+        loadAgentRuns();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载失败');
@@ -68,6 +73,16 @@ export function useProject(id: string | undefined): ProjectState & ProjectAction
       setSpec(requirement_spec);
     } catch {
       // spec might not be available yet
+    }
+  };
+
+  const loadAgentRuns = async () => {
+    if (!id) return;
+    try {
+      const { runs } = await getAgentRuns(id);
+      setAgentRuns(runs);
+    } catch {
+      // runs might not be available yet
     }
   };
 
@@ -160,6 +175,7 @@ export function useProject(id: string | undefined): ProjectState & ProjectAction
     project,
     fileTree,
     spec,
+    agentRuns,
     loading,
     error,
     loadFile,

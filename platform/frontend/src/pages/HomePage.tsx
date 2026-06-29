@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
+import { DesignSpecSelector, type DesignSpec } from '@/components/DesignSpecSelector';
 
 const TEMPLATES = [
   { value: 'crud_admin', label: 'CRUD 管理后台', icon: '📋' },
@@ -31,6 +32,7 @@ export function HomePage() {
   const navigate = useNavigate();
   const [requirement, setRequirement] = useState('');
   const [template, setTemplate] = useState('crud_admin');
+  const [designSpec, setDesignSpec] = useState<DesignSpec>({ preset: 'professional_blue' });
   const [submitting, setSubmitting] = useState(false);
 
   const charCount = requirement.length;
@@ -49,6 +51,7 @@ export function HomePage() {
           template,
           language: 'zh',
           constraints: { database: 'sqlite' },
+          design_spec: designSpec,
         }),
       });
 
@@ -98,6 +101,11 @@ export function HomePage() {
           </select>
           <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 pointer-events-none text-muted" />
         </div>
+      </div>
+
+      {/* Design Spec Selector */}
+      <div className="mb-4">
+        <DesignSpecSelector value={designSpec} onChange={setDesignSpec} />
       </div>
 
       {/* Requirement Input */}

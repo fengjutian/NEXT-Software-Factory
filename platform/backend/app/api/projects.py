@@ -53,7 +53,9 @@ async def create_project(
                     {"name": "requirement", "label": "需求分析", "status": "pending"},
                     {"name": "backend", "label": "生成后端", "status": "pending"},
                     {"name": "frontend", "label": "生成前端", "status": "pending"},
-                    {"name": "test", "label": "运行测试", "status": "pending"},
+                    {"name": "review", "label": "代码质检", "status": "pending"},
+                    {"name": "test", "label": "生成测试", "status": "pending"},
+                    {"name": "documentation", "label": "生成文档", "status": "pending"},
                 ],
             },
         },
@@ -173,6 +175,48 @@ async def get_project_spec(
     }
 
 
+@router.put("/{project_id}/spec")
+async def update_project_spec(
+    project_id: UUID,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update RequirementSpec after user review."""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    project.requirement_spec = body.get("requirement_spec", {})
+    project.summary = project.requirement_spec.get("summary", project.summary)
+    await db.commit()
+
+    return {"success": True, "data": {"updated": True}}
+
+
+@router.post("/{project_id}/continue")
+async def continue_pipeline(
+    project_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Continue pipeline from Backend Agent after user confirms Spec."""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    status_ok = project.status in ("analyzing", "generating_backend")
+    if not status_ok:
+        raise HTTPException(status_code=400, detail="项目状态不允许继续")
+
+    if not project.requirement_spec:
+        raise HTTPException(status_code=400, detail="需求分析尚未完成")
+
+    orchestrator = Orchestrator(db)
+    background_tasks.add_task(orchestrator.continue_from_backend, project)
+
+    return {"success": True, "data": {"status": "continuing"}}
+
+
 # ── File endpoints ──
 
 from app.models.generated_file import GeneratedFile
@@ -283,18 +327,22 @@ def _status_to_step(status: str) -> str | None:
 
 def _build_step_list(status: str) -> list[dict]:
     """Build step list with statuses based on project status."""
-    step_order = ["requirement", "backend", "frontend", "test"]
+    step_order = ["requirement", "backend", "frontend", "review", "test", "documentation"]
     step_labels = {
         "requirement": "需求分析",
         "backend": "生成后端",
         "frontend": "生成前端",
-        "test": "运行测试",
+        "review": "代码质检",
+        "test": "生成测试",
+        "documentation": "生成文档",
     }
     thresholds = {
         "requirement": "analyzing",
         "backend": "generating_backend",
         "frontend": "generating_frontend",
+        "review": "reviewing",
         "test": "testing",
+        "documentation": "generating_documentation",
     }
 
     if status == "failed":

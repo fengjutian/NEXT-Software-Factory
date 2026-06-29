@@ -15,13 +15,13 @@ import { PipelineProgress } from '@/components/PipelineProgress';
 import { FileTree } from '@/components/FileTree';
 import { CodePreview } from '@/components/CodePreview';
 import { StatCard } from '@/components/StatCard';
-import { getDownloadUrl } from '@/api/client';
+import { getDownloadUrl, continuePipeline } from '@/api/client';
 import type { FileContent } from '@/api/client';
 import { useState } from 'react';
 
 export function ProjectPage() {
   const { id } = useParams<{ id: string }>();
-  const { project, fileTree, spec, loading, error, loadFile } = useProject(id);
+  const { project, fileTree, spec, agentRuns, loading, error, loadFile } = useProject(id);
   const [selectedFile, setSelectedFile] = useState<FileContent | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
 
@@ -105,9 +105,21 @@ export function ProjectPage() {
               <AlertCircle className="w-5 h-5 text-red-500 mt-0.5" />
               <div className="flex-1">
                 <h3 className="font-semibold text-red-800 mb-1">生成失败</h3>
-                <p className="text-sm text-red-700 mb-4">
-                  {project.error_message || '未知错误'}
-                </p>
+                {agentRuns && (
+                  <div className="mb-3 space-y-1">
+                    {agentRuns.filter(r => r.status === 'failed').map(r => (
+                      <div key={r.id} className="text-sm">
+                        <span className="font-medium">{STEP_LABELS[r.agent_name] || r.agent_name}</span>
+                        <span className="text-red-600 ml-2">{r.error_message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(!agentRuns || agentRuns.filter(r => r.status === 'failed').length === 0) && (
+                  <p className="text-sm text-red-700 mb-4">
+                    {project.error_message || '未知错误'}
+                  </p>
+                )}
                 <div className="flex gap-3">
                   <Link
                     to="/"
@@ -129,11 +141,11 @@ export function ProjectPage() {
           </div>
         )}
 
-        {/* Spec preview (if available) */}
-        {spec && (
+        {/* Spec preview (if available during running) */}
+        {spec && isRunning && (
           <div className="mt-6 bg-white border rounded-lg p-6">
             <h3 className="text-sm font-semibold mb-3">📋 需求分析结果</h3>
-            <div className="grid grid-cols-3 gap-4 text-sm">
+            <div className="grid grid-cols-3 gap-4 text-sm mb-4">
               <div>
                 <span className="text-muted">实体</span>
                 <p className="font-medium">{spec.entities?.length || 0}</p>
@@ -147,6 +159,22 @@ export function ProjectPage() {
                 <p className="font-medium">{spec.pages?.length || 0}</p>
               </div>
             </div>
+            <p className="text-xs text-muted mb-3">
+              请确认以上分析是否符合你的需求。确认后将自动生成后端和前端代码。
+            </p>
+            <button
+              onClick={async () => {
+                try {
+                  await continuePipeline(id!);
+                  window.location.reload();
+                } catch {
+                  toast.error('操作失败');
+                }
+              }}
+              className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm hover:bg-primary-700"
+            >
+              确认并继续生成
+            </button>
           </div>
         )}
       </div>
@@ -317,3 +345,12 @@ function StatusBadge({ status }: { status: string }) {
     </span>
   );
 }
+
+const STEP_LABELS: Record<string, string> = {
+  requirement: '需求分析',
+  backend: '生成后端',
+  frontend: '生成前端',
+  review: '代码质检',
+  test: '生成测试',
+  documentation: '生成文档',
+};

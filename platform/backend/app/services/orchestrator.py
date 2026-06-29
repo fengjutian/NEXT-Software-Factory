@@ -12,6 +12,7 @@ from app.models.generated_file import GeneratedFile
 from app.agents.requirement_agent import RequirementAgent
 from app.agents.backend_agent import BackendAgent
 from app.agents.frontend_agent import FrontendAgent
+from app.agents.review_agent import ReviewAgent
 from app.agents.test_agent import TestAgent
 from app.agents.documentation_agent import DocumentationAgent
 from app.websocket.manager import ws_manager
@@ -52,13 +53,19 @@ class Orchestrator:
             if project.status == "failed":
                 return project
 
-            # ── Step 4: Test Agent ──
+            # ── Step 4: Review Agent ──
+            project = await self._run_review_agent(project)
+
+            if project.status == "failed":
+                return project
+
+            # ── Step 5: Test Agent ──
             project = await self._run_test_agent(project)
 
             if project.status == "failed":
                 return project
 
-            # ── Step 5: Documentation Agent ──
+            # ── Step 6: Documentation Agent ──
             project = await self._run_documentation_agent(project)
 
             if project.status == "failed":
@@ -329,6 +336,79 @@ class Orchestrator:
             )
             raise
 
+    async def _run_review_agent(self, project: Project) -> Project:
+        """Run Review Agent to check code quality."""
+        project_id = str(project.id)
+
+        run = AgentRun(
+            project_id=project.id,
+            agent_name="review",
+            status="running",
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        )
+        self.db.add(run)
+        await self.db.commit()
+
+        await ws_manager.send_step_started(project_id, "review", "代码质检")
+
+        # Collect all generated files so far
+        from sqlalchemy import select as sa_select
+        files_query = (
+            sa_select(GeneratedFile)
+            .where(GeneratedFile.project_id == project.id)
+            .order_by(GeneratedFile.file_path)
+        )
+        generated_files = (await self.db.execute(files_query)).scalars().all()
+
+        agent = ReviewAgent(ws_manager=ws_manager)
+        input_spec = {
+            "files": [
+                {"path": f.file_path, "content": f.content, "type": f.file_type}
+                for f in generated_files
+            ],
+            "entities": project.requirement_spec.get("entities", []) if project.requirement_spec else [],
+            "api_endpoints": project.requirement_spec.get("api_endpoints", []) if project.requirement_spec else [],
+        }
+
+        try:
+            start = time.monotonic()
+            result = await agent.run(project_id, input_spec)
+            elapsed = (time.monotonic() - start) * 1000
+
+            report = result.get("review_report", {})
+            violations = report.get("violations", [])
+            criticals = [v for v in violations if v.get("severity") == "CRITICAL"]
+
+            run.output_result = result
+            run.status = "done"
+            run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            await self.db.commit()
+
+            if criticals and report.get("action") == "retry":
+                # Log but don't block — MVP: warn and continue
+                await ws_manager.send_log(
+                    project_id, "review",
+                    f"发现 {len(criticals)} 个严重问题，已记录（MVP 模式不阻断流水线）"
+                )
+
+            await ws_manager.send_step_completed(
+                project_id, "review", "代码质检",
+                duration_ms=elapsed,
+                summary=f"{'✅ 通过' if not criticals else f'⚠️ {len(criticals)} 个严重问题'}, "
+                        f"{len(violations) - len(criticals)} 个警告",
+            )
+
+            return project
+
+        except Exception as e:
+            run.status = "failed"
+            run.error_message = str(e)
+            run.finished_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            # Review failure doesn't fail the pipeline
+            await self.db.commit()
+            await ws_manager.send_log(project_id, "review", f"质检失败（不阻断）: {str(e)}")
+            return project
+
     async def _run_test_agent(self, project: Project) -> Project:
         """Run Test Agent and persist generated test files + report."""
         project_id = str(project.id)
@@ -563,3 +643,45 @@ class Orchestrator:
     async def run_requirement_only(self, project: Project) -> Project:
         """Run only the Requirement Agent (for quick preview)."""
         return await self._run_requirement_agent(project)
+
+    async def continue_from_backend(self, project: Project) -> Project:
+        """Continue pipeline from Backend Agent (after user confirms Spec)."""
+        return await self._run_full_post_requirement(project)
+
+    async def _run_full_post_requirement(self, project: Project) -> Project:
+        """Run all steps after requirement (Backend → Frontend → Review → Test → Docs)."""
+        project_id = str(project.id)
+
+        try:
+            project = await self._run_backend_agent(project)
+            if project.status == "failed":
+                return project
+
+            project = await self._run_frontend_agent(project)
+            if project.status == "failed":
+                return project
+
+            project = await self._run_review_agent(project)
+            if project.status == "failed":
+                return project
+
+            project = await self._run_test_agent(project)
+            if project.status == "failed":
+                return project
+
+            project = await self._run_documentation_agent(project)
+            if project.status == "failed":
+                return project
+
+            project.status = "done"
+            await self.db.commit()
+            await ws_manager.send_pipeline_completed(project_id, project.stats or {})
+            return project
+
+        except Exception as e:
+            logger.exception(f"Pipeline failed for project {project_id}")
+            project.status = "failed"
+            project.error_message = str(e)
+            await self.db.commit()
+            await ws_manager.send_pipeline_failed(project_id, "unknown", str(e))
+            return project

@@ -196,6 +196,10 @@ export async function updateSpec(id: string, requirement_spec: RequirementSpec):
   })
 }
 
+export async function continuePipeline(id: string): Promise<void> {
+  await request(`/projects/${id}/continue`, { method: 'POST' })
+}
+
 export async function getFileTree(id: string): Promise<{ tree: FileTreeNode[] }> {
   return request<{ tree: FileTreeNode[] }>(`/projects/${id}/files`)
 }
