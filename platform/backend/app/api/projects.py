@@ -1,16 +1,18 @@
-"""Project API — create, list, get, delete projects."""
+"""Project API — create, list, get, delete projects.
 
-import time
+Pipeline is executed asynchronously via background tasks.
+"""
+
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.models.project import Project
 from app.schemas.agent import NaturalLanguageSpec
-from app.agents.requirement_agent import RequirementAgent
-from app.websocket.manager import ws_manager
+from app.services.orchestrator import Orchestrator
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
@@ -18,82 +20,37 @@ router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 @router.post("", status_code=201)
 async def create_project(
     body: NaturalLanguageSpec,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new project and start the pipeline.
-
-    Creates the project record, then immediately runs the Requirement Agent.
-    On success, the RequirementSpec is saved and the project advances to the next step.
-    """
-    # Create project record
+    """Create a new project and start the pipeline in the background."""
     project = Project(
         requirement=body.requirement,
         template=body.template,
         language=body.language,
         constraints=body.constraints.model_dump(),
         design_spec=body.design_spec,
-        status="analyzing",
+        status="pending",
     )
     db.add(project)
     await db.commit()
     await db.refresh(project)
 
-    project_id = str(project.id)
-
-    # ── Run Requirement Agent ──
-    agent = RequirementAgent(ws_manager=ws_manager)
-    input_spec = {
-        "requirement": body.requirement,
-        "template": body.template,
-        "language": body.language,
-        "constraints": body.constraints.model_dump(),
-    }
-
-    await ws_manager.send_step_started(project_id, "requirement", "需求分析")
-
-    try:
-        start = time.monotonic()
-        result = await agent.run(project_id, input_spec)
-        elapsed = (time.monotonic() - start) * 1000
-
-        # Save the RequirementSpec
-        project.requirement_spec = result
-        project.summary = result.get("summary", "")
-        project.status = "generating_backend"  # Ready for next step
-
-        await db.commit()
-
-        await ws_manager.send_step_completed(
-            project_id, "requirement", "需求分析",
-            duration_ms=elapsed,
-            summary=f"识别 {len(result.get('entities', []))} 个实体, "
-                    f"{len(result.get('api_endpoints', []))} 个端点, "
-                    f"{len(result.get('pages', []))} 个页面",
-        )
-
-    except Exception as e:
-        # Mark project as failed but keep the record
-        project.status = "failed"
-        project.error_message = str(e)
-        await db.commit()
-
-        await ws_manager.send_step_failed(
-            project_id, "requirement", "需求分析", str(e), retryable=True,
-        )
-        raise HTTPException(status_code=500, detail=f"需求分析失败: {str(e)}")
+    # Run pipeline in background
+    orchestrator = Orchestrator(db)
+    background_tasks.add_task(orchestrator.run_full_pipeline, project)
 
     return {
         "success": True,
         "data": {
-            "id": project_id,
+            "id": str(project.id),
             "requirement": body.requirement,
             "status": project.status,
-            "summary": project.summary,
             "created_at": project.created_at.isoformat(),
             "progress": {
-                "current_step": "requirement",
+                "current_step": None,
                 "steps": [
-                    {"name": "requirement", "label": "需求分析", "status": "completed"},
+                    {"name": "requirement", "label": "需求分析", "status": "pending"},
                     {"name": "backend", "label": "生成后端", "status": "pending"},
                     {"name": "frontend", "label": "生成前端", "status": "pending"},
                     {"name": "test", "label": "运行测试", "status": "pending"},
@@ -110,9 +67,7 @@ async def list_projects(
     search: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """List projects with pagination."""
-    from sqlalchemy import select, func
-
+    """List projects with pagination and optional search."""
     query = select(Project)
     if search:
         query = query.where(
@@ -121,7 +76,6 @@ async def list_projects(
         )
     query = query.order_by(Project.created_at.desc())
 
-    # Count total
     count_query = select(func.count()).select_from(Project)
     if search:
         count_query = count_query.where(
@@ -130,7 +84,6 @@ async def list_projects(
         )
     total = (await db.execute(count_query)).scalar() or 0
 
-    # Paginate
     offset = (page - 1) * page_size
     query = query.offset(offset).limit(page_size)
     rows = (await db.execute(query)).scalars().all()
@@ -160,7 +113,7 @@ async def get_project(
     project_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get project detail."""
+    """Get project detail with progress and stats."""
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -176,12 +129,7 @@ async def get_project(
             "updated_at": project.updated_at.isoformat(),
             "progress": {
                 "current_step": _status_to_step(project.status),
-                "steps": [
-                    {"name": "requirement", "label": "需求分析", "status": _step_status(project.status, "analyzing")},
-                    {"name": "backend", "label": "生成后端", "status": _step_status(project.status, "generating_backend")},
-                    {"name": "frontend", "label": "生成前端", "status": _step_status(project.status, "generating_frontend")},
-                    {"name": "test", "label": "运行测试", "status": _step_status(project.status, "testing")},
-                ],
+                "steps": _build_step_list(project.status),
             },
             "stats": project.stats,
             "error_message": project.error_message,
@@ -194,7 +142,7 @@ async def delete_project(
     project_id: UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a project and its associated files."""
+    """Delete a project and all associated files/agent runs."""
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -205,52 +153,238 @@ async def delete_project(
     return {"success": True, "data": None}
 
 
+@router.get("/{project_id}/spec")
+async def get_project_spec(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the RequirementSpec for a project."""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if not project.requirement_spec:
+        raise HTTPException(status_code=404, detail="需求分析尚未完成")
+
+    return {
+        "success": True,
+        "data": {
+            "requirement_spec": project.requirement_spec,
+        },
+    }
+
+
+# ── File endpoints ──
+
+from app.models.generated_file import GeneratedFile
+
+
+@router.get("/{project_id}/files")
+async def get_file_tree(
+    project_id: UUID,
+    type: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the file tree for a project."""
+    query = select(GeneratedFile).where(GeneratedFile.project_id == project_id)
+    if type:
+        query = query.where(GeneratedFile.file_type == type)
+    query = query.order_by(GeneratedFile.file_path)
+
+    rows = (await db.execute(query)).scalars().all()
+
+    tree = _build_file_tree(rows)
+
+    return {
+        "success": True,
+        "data": {"tree": tree},
+    }
+
+
+@router.get("/{project_id}/files/{file_path:path}")
+async def get_file_content(
+    project_id: UUID,
+    file_path: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the content of a specific generated file."""
+    from urllib.parse import unquote
+
+    file_path = unquote(file_path)
+
+    query = select(GeneratedFile).where(
+        GeneratedFile.project_id == project_id,
+        GeneratedFile.file_path == file_path,
+    )
+    row = (await db.execute(query)).scalar_one_or_none()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="文件不存在")
+
+    language = _guess_language(row.file_path)
+
+    return {
+        "success": True,
+        "data": {
+            "path": row.file_path,
+            "content": row.content,
+            "language": language,
+            "size": row.size_bytes or 0,
+            "file_type": row.file_type,
+        },
+    }
+
+
+@router.get("/{project_id}/download")
+async def download_project(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Download project as a ZIP file."""
+    from fastapi.responses import StreamingResponse
+    import zipfile
+    import io
+
+    query = select(GeneratedFile).where(GeneratedFile.project_id == project_id)
+    rows = (await db.execute(query)).scalars().all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="项目没有生成文件")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for row in rows:
+            zf.writestr(row.file_path, row.content or "")
+
+    buf.seek(0)
+    project = await db.get(Project, project_id)
+    filename = f"{project.summary or 'project'}.zip" if project else "project.zip"
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 # ── Helpers ──
 
-_STATUS_ORDER = {
-    "pending": 0,
-    "analyzing": 1,
-    "generating_backend": 2,
-    "generating_frontend": 3,
-    "testing": 4,
-    "done": 5,
-    "failed": -1,
-}
-
-_STEP_MAP = {
-    "pending": "requirement",
-    "analyzing": "requirement",
-    "generating_backend": "backend",
-    "generating_frontend": "frontend",
-    "testing": "test",
-    "done": "done",
-}
-
-_STEP_THRESHOLD = {
-    "requirement": "analyzing",
-    "backend": "generating_backend",
-    "frontend": "generating_frontend",
-    "test": "testing",
-}
-
-
 def _status_to_step(status: str) -> str | None:
-    return _STEP_MAP.get(status)
+    mapping = {
+        "pending": None,
+        "analyzing": "requirement",
+        "generating_backend": "backend",
+        "generating_frontend": "frontend",
+        "testing": "test",
+        "done": "done",
+        "failed": None,
+    }
+    return mapping.get(status)
 
 
-def _step_status(project_status: str, step_threshold: str) -> str:
-    """Determine step status based on project status."""
-    if project_status == "failed":
-        return "failed"
-    if project_status == "done":
-        return "completed"
+def _build_step_list(status: str) -> list[dict]:
+    """Build step list with statuses based on project status."""
+    step_order = ["requirement", "backend", "frontend", "test"]
+    step_labels = {
+        "requirement": "需求分析",
+        "backend": "生成后端",
+        "frontend": "生成前端",
+        "test": "运行测试",
+    }
+    thresholds = {
+        "requirement": "analyzing",
+        "backend": "generating_backend",
+        "frontend": "generating_frontend",
+        "test": "testing",
+    }
 
-    current_order = _STATUS_ORDER.get(project_status, 0)
-    step_order = _STATUS_ORDER.get(step_threshold, 0)
+    if status == "failed":
+        return [
+            {"name": s, "label": step_labels[s], "status": "failed" if s == "backend" else "skipped"}
+            for s in step_order
+        ]
+    if status == "done":
+        return [
+            {"name": s, "label": step_labels[s], "status": "completed"}
+            for s in step_order
+        ]
 
-    if step_order < current_order:
-        return "completed"
-    elif step_order == current_order:
-        return "running"
-    else:
-        return "pending"
+    steps = []
+    current_found = False
+    for step in step_order:
+        threshold = thresholds[step]
+        if status == threshold:
+            steps.append({"name": step, "label": step_labels[step], "status": "running"})
+            current_found = True
+        elif current_found:
+            steps.append({"name": step, "label": step_labels[step], "status": "pending"})
+        elif _status_index(status) >= _status_index(threshold):
+            steps.append({"name": step, "label": step_labels[step], "status": "completed"})
+        else:
+            steps.append({"name": step, "label": step_labels[step], "status": "pending"})
+    return steps
+
+
+def _status_index(status: str) -> int:
+    order = ["pending", "analyzing", "generating_backend", "generating_frontend", "testing", "done"]
+    try:
+        return order.index(status)
+    except ValueError:
+        return 0
+
+
+def _build_file_tree(files: list[GeneratedFile]) -> list[dict]:
+    """Build a nested file tree from flat file list."""
+    tree: dict[str, dict] = {}
+
+    for f in files:
+        parts = f.file_path.split("/")
+        current = tree
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:
+                # File
+                current[part] = {
+                    "name": part,
+                    "type": "file",
+                    "size": f.size_bytes,
+                    "file_type": f.file_type,
+                }
+            else:
+                # Directory
+                if part not in current:
+                    current[part] = {"name": part, "type": "directory", "children": {}}
+                current = current[part].setdefault("children", {})
+
+    return _dict_to_list(tree)
+
+
+def _dict_to_list(d: dict) -> list[dict]:
+    """Convert dict-based tree to list-based tree."""
+    result = []
+    for name, node in d.items():
+        if node["type"] == "directory":
+            node["children"] = _dict_to_list(node.get("children", {}))
+        result.append(node)
+    return sorted(result, key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
+
+
+def _guess_language(file_path: str) -> str:
+    """Guess programming language from file extension."""
+    ext_map = {
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".json": "json",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+        ".md": "markdown",
+        ".sql": "sql",
+        ".html": "html",
+        ".css": "css",
+        ".dockerfile": "dockerfile",
+        ".txt": "text",
+    }
+    import os
+    ext = os.path.splitext(file_path)[1].lower()
+    return ext_map.get(ext, "text")
