@@ -1,48 +1,53 @@
 """WebSocket manager for real-time pipeline progress updates."""
 
 import json
+import asyncio
 from typing import Any
 
 from fastapi import WebSocket
 
 
 class WebSocketManager:
-    """Manages WebSocket connections per project."""
+    """Manages WebSocket connections per project. Thread-safe via asyncio.Lock."""
 
     def __init__(self):
-        # project_id -> set of WebSocket connections
+        self._lock = asyncio.Lock()
         self._connections: dict[str, set[WebSocket]] = {}
 
     async def connect(self, project_id: str, websocket: WebSocket) -> None:
-        """Accept and register a new WebSocket connection."""
         await websocket.accept()
-        if project_id not in self._connections:
-            self._connections[project_id] = set()
-        self._connections[project_id].add(websocket)
+        async with self._lock:
+            if project_id not in self._connections:
+                self._connections[project_id] = set()
+            self._connections[project_id].add(websocket)
 
     def disconnect(self, project_id: str, websocket: WebSocket) -> None:
-        """Remove a WebSocket connection."""
+        # Called from websocket handler — no async needed for simple set discard
         if project_id in self._connections:
             self._connections[project_id].discard(websocket)
             if not self._connections[project_id]:
                 del self._connections[project_id]
 
     async def send_event(self, project_id: str, event: dict[str, Any]) -> None:
-        """Send a JSON event to all connections for a project."""
-        if project_id not in self._connections:
-            return
+        async with self._lock:
+            if project_id not in self._connections:
+                return
+            connections = list(self._connections[project_id])
 
         message = json.dumps(event, ensure_ascii=False)
         dead: list[WebSocket] = []
 
-        for ws in self._connections[project_id]:
+        for ws in connections:
             try:
                 await ws.send_text(message)
             except Exception:
                 dead.append(ws)
 
-        for ws in dead:
-            self.disconnect(project_id, ws)
+        if dead:
+            async with self._lock:
+                if project_id in self._connections:
+                    for ws in dead:
+                        self._connections[project_id].discard(ws)
 
     async def send_log(
         self, project_id: str, agent_name: str, message: str

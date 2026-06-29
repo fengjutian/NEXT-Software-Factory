@@ -11,8 +11,8 @@ from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.models.project import Project
-from app.schemas.agent import NaturalLanguageSpec
-from app.services.orchestrator import Orchestrator
+from app.models.agent_run import AgentRun
+from app.models.generated_file import GeneratedFile
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"])
 
@@ -37,8 +37,8 @@ async def create_project(
     await db.refresh(project)
 
     # Run pipeline in background
-    orchestrator = Orchestrator(db)
-    background_tasks.add_task(orchestrator.run_full_pipeline, project)
+    orchestrator = Orchestrator()
+    background_tasks.add_task(orchestrator.run_full_pipeline, str(project.id))
 
     return {
         "success": True,
@@ -211,10 +211,51 @@ async def continue_pipeline(
     if not project.requirement_spec:
         raise HTTPException(status_code=400, detail="需求分析尚未完成")
 
-    orchestrator = Orchestrator(db)
-    background_tasks.add_task(orchestrator.continue_from_backend, project)
+    orchestrator = Orchestrator()
+    background_tasks.add_task(orchestrator.continue_from_backend, str(project.id))
 
     return {"success": True, "data": {"status": "continuing"}}
+
+
+# ── Agent Runs ──
+
+
+@router.get("/{project_id}/runs")
+async def get_agent_runs(
+    project_id: UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get agent run records for a project."""
+    from sqlalchemy import select as sa_select
+
+    query = (
+        sa_select(AgentRun)
+        .where(AgentRun.project_id == project_id)
+        .order_by(AgentRun.created_at.asc())
+    )
+    rows = (await db.execute(query)).scalars().all()
+
+    return {
+        "success": True,
+        "data": {
+            "runs": [
+                {
+                    "id": str(r.id),
+                    "agent_name": r.agent_name,
+                    "status": r.status,
+                    "started_at": r.started_at.isoformat() if r.started_at else None,
+                    "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+                    "duration_ms": (
+                        int((r.finished_at - r.started_at).total_seconds() * 1000)
+                        if r.started_at and r.finished_at
+                        else None
+                    ),
+                    "error_message": r.error_message,
+                }
+                for r in rows
+            ],
+        },
+    }
 
 
 # ── File endpoints ──
@@ -225,13 +266,13 @@ from app.models.generated_file import GeneratedFile
 @router.get("/{project_id}/files")
 async def get_file_tree(
     project_id: UUID,
-    type: str | None = None,
+    file_type: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Get the file tree for a project."""
     query = select(GeneratedFile).where(GeneratedFile.project_id == project_id)
-    if type:
-        query = query.where(GeneratedFile.file_type == type)
+    if file_type:
+        query = query.where(GeneratedFile.file_type == file_type)
     query = query.order_by(GeneratedFile.file_path)
 
     rows = (await db.execute(query)).scalars().all()
