@@ -119,6 +119,8 @@ platform/
 │   ├── src/
 │   │   ├── api/                     # API Client
 │   │   │   └── client.ts            # fetch 封装
+│   │   ├── assets/                  # 🆕 静态资源
+│   │   │   └── (用户上传的 Logo/Favicon)
 │   │   ├── components/
 │   │   │   ├── ui/                  # shadcn/ui
 │   │   │   ├── RequirementInput.tsx
@@ -187,7 +189,8 @@ Request:
   "language": "string — 默认 'zh'",
   "constraints": {
     "database": "string — 默认 'sqlite'"
-  }
+  },
+  "design_spec": "object | null — 🆕 可选，设计规范 (DesignSpec)，见 docs/design-system.md"
 }
 
 Response (201):
@@ -416,7 +419,73 @@ Response (200):
 
 ---
 
-### 4.6 WebSocket — 实时进度
+### 4.6 设计资产与预设 🆕
+
+#### `POST /api/v1/assets/upload` — 上传设计资产
+
+```
+Content-Type: multipart/form-data
+
+Form Fields:
+  file: (binary) — 文件
+  type: "logo" | "favicon"
+
+Constraints:
+  - Logo: SVG/PNG, ≤ 500KB
+  - Favicon: ICO/PNG, ≤ 100KB
+
+Response (201):
+{
+  "success": true,
+  "data": {
+    "asset_id": "uuid",
+    "path": "assets/logo-abc123.svg",
+    "url": "/api/v1/assets/logo-abc123.svg",
+    "type": "logo",
+    "size_bytes": 45678,
+    "mime_type": "image/svg+xml"
+  }
+}
+
+Errors:
+  400 — 文件格式不支持
+  413 — 文件过大
+```
+
+#### `GET /api/v1/design-presets` — 获取预设设计规范
+
+```
+Response (200):
+{
+  "success": true,
+  "data": {
+    "presets": [
+      {"id": "professional_blue", "name": "企业蓝", "preview_colors": ["#3B82F6", "#FFFFFF", "#111827"]},
+      {"id": "nature_green", "name": "自然绿", "preview_colors": ["#10B981", "#FAFDF7", "#1A2E1A"]},
+      {"id": "dark_mode", "name": "暗夜模式", "preview_colors": ["#6366F1", "#0F1117", "#E1E4EA"]}
+    ]
+  }
+}
+```
+
+#### `GET /api/v1/design-presets/{preset_id}` — 获取预设完整 Token
+
+```
+Response (200):
+{
+  "success": true,
+  "data": {
+    "preset": {
+      "id": "professional_blue",
+      "tokens": { ... }  // 完整 DesignSpec tokens
+    }
+  }
+}
+```
+
+---
+
+### 4.7 WebSocket — 实时进度
 
 #### `WS /ws/projects/{project_id}`
 

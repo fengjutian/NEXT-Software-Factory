@@ -28,7 +28,8 @@
 ┌─────────────────────────────────────────────────┐
 │ Requirement Agent                                │
 │                                                  │
-│ Input:  NaturalLanguageSpec                     │
+│ Input:  NaturalLanguageSpec + DesignSpec         │
+│         (用户可选上传设计规范)                      │
 │ Output: RequirementSpec                          │
 │         (含所有功能 ID：entity_id, endpoint_id,  │
 │          page_id —— 这是全流水线的追踪锚点)       │
@@ -54,6 +55,7 @@
 │ Input:  BackendResult.artifacts.openapi_spec     │
 │         + RequirementSpec.pages                  │
 │         + BackendResult.backend_manifest ← 读这个│
+│         + DesignSpec (设计规范，可选)              │
 │ Output: FrontendResult                           │
 │         (含 frontend_manifest: 声明每个 page 的  │
 │          实现状态，以及对接了哪些 endpoint)        │
@@ -77,7 +79,7 @@
 
 ## 3. NaturalLanguageSpec
 
-用户入口，Requirement Agent 的唯一输入。
+用户入口，Requirement Agent 的输入。包含需求文本、模板选择、约束条件和可选的设计规范。
 
 ```json
 {
@@ -90,7 +92,8 @@
     "database": "string — 'sqlite' | 'postgresql'，默认 'sqlite'",
     "auth_required": "boolean — 是否需要认证，默认 false",
     "max_entities": "number — 最大实体数限制，默认 10"
-  }
+  },
+  "design_spec": "object | null — 可选，用户上传/选择的设计规范 (DesignSpec)，见 docs/design-system.md"
 }
 ```
 
@@ -386,6 +389,12 @@ Backend Agent 的输出。
 ## 7. FrontendResult
 
 Frontend Agent 的输出。
+
+**输入中包含**：
+- `openapi_spec`: 后端 OpenAPI Spec
+- `pages`: RequirementSpec 中的页面定义
+- `backend_manifest`: 后端实际完成清单
+- `design_spec`: **用户的设计规范（DesignSpec）**。如果存在，前端代码必须严格遵守，禁止硬编码颜色/字体/圆角/间距。如果不存在，使用默认预设 `professional_blue`。
 
 ```json
 {
